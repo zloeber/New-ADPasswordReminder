@@ -1,0 +1,1101 @@
+﻿#Requires -Version 2.0 
+<# 
+.SYNOPSIS
+    Notifies users that their password is about to expire.
+
+.DESCRIPTION
+    Let's users know their password will soon expire. Details the steps needed to change their password, and advises on what the password policy requires. Accounts for both standard Default Domain Policy based password policy and the fine grain password policy available in 2008 domains.
+
+.NOTES
+    Version -
+        3.0 - Updated from original code to include:
+                Eliminated all tabs for spaces in the code (because I'm weird like that)
+                Added options for passing the days to expire and other variables that were static in the previous version
+                Added SurpressFinalNotice switch for testing purposes
+                Removed global variables because they are bad
+                Simplified the email content creation (and thus modification to suit your needs)
+                Changed the logic to assume exact matching for the days to expire and added a 'LooseMatching' option for the old behavior
+                Eliminated the automatic installation of AD module feature because that seems creepy to me
+                Eliminated the imageless option (simply set your image path as an empty string instead if you will not be hosting images for your notifications)
+                Added ability to schedule a job and use the passed variables to create the parameters being used in the scheduled task
+                Embedded the gifs used for the emails into the script for extraction with the -ExtractGifs switch
+                Added flag and code for adding the user used for installing as a scheduled task to the local 'login as batch job' right
+                Removed reference to http://www.passwordmeter.com/ as it seems weird to put in a password you plan on using through unencrypted channels
+                Converted most write-host to write-output or write-verbose
+                Added parametersets
+                Added more detail to event logs (including whom was notified and more job information)
+
+        2.9 - See changelog at http://www.ehloworld.com/596
+
+    Authors -
+        M. Ali (original AD query)
+        Pat Richard, Lync MVP
+        Zachary Loeber (this version)
+
+.LINK     
+    http://www.ehloworld.com/318 (original script)
+
+.LINK
+    http://www.the-little-things.net (this version)
+
+.INPUTS
+    None. You cannot pipe objects to this script
+
+.PARAMETER Demo
+    Runs the script in demo mode. No emails are sent to the user(s), and onscreen output includes those who are expiring soon.
+.PARAMETER PreviewUser
+    Process a single user account as if their password will expire in 1 day. Use with DaysToWarn = 1 or LooseMatching to send an example notice to the user.
+.PARAMETER LooseMatching
+    Use this switch to send notices if the expiration date is less than or equal to the days to warn. Default is to only send a notice if the DaysToWarn exactly matches the number of days until the password expires.
+.PARAMETER Install
+    Create the scheduled task to run the script daily.
+.PARAMETER SetupRunAsBatch
+    Only useful if installing as a scheduled task. This switch will attempt to add the user account the local 'login as batch job' rights. (Note: You need to have the .net 3.5 feature installed for this to work.)
+.PARAMETER Credential
+    Only used if installing the script as a scheduled task. This will be used as the credentials for the scheduled task.
+.PARAMETER ExtractGifs
+    Extract embedded gifs used in the email notification. These should then be moved to a publicly available server.
+.PARAMETER Alert
+    Send the notice as an alert (red) instead of a warning (yellow). This makes no difference if you are not using the images.
+.PARAMETER DaysToWarn
+    How many days before the password expiration should a notice be sent? Defaults to 7 days.
+.PARAMETER OU
+    Can be used to filter checked user accounts to a specific organizational unit. Defaults to entire domain.
+.PARAMETER SurpressFinalNotice
+    Default behavior is to add a red final notice banner to emails if there is only 1 day until the password expires. This option surpresses that banner.
+.PARAMETER Company
+    Your company name
+.PARAMETER PasswordChangeURL
+    This can be an owa password change url or possibly an sso password change url
+.PARAMETER EmailServer
+    Your email relay
+.PARAMETER EmailFrom
+    Where the email is seen to come from
+.PARAMETER HelpDeskPhone
+    Your helpdesk phone number. Leave blank to exlcude from email notifications
+.PARAMETER HelpDeskURL
+    Web URL of your helpdesk system. Leave blank to exclude from email notifications.
+.PARAMETER ImagePathBelow
+    Path should be accessible by ALL users who may receive emails. This includes external/mobile users. Leave blank to send emails without images.
+
+.EXAMPLE 
+    .\New-ADPasswordReminder.ps1 -ExtractGifs
+    
+    Description
+    --------------
+    Extract the embedded gifs used in the notifications generated by this script. These should be then moved over to a publicly available web server.
+
+.EXAMPLE 
+    .\New-ADPasswordReminder.ps1 -Demo -DaysToWarn 5
+    
+    Description
+    --------------
+    Searches Active Directory for users who have passwords expiring in 5 days, and lists those users on the screen, along with days till expiration and policy setting
+
+.EXAMPLE 
+     .\New-ADPasswordReminder.ps1 -DaysToWarn 7 -Demo -LooseMatching
+
+    Description
+    --------------
+    Query AD for any accounts with passwords that will expire in 7 days or less and print them to the screen.
+
+.EXAMPLE 
+     .\New-ADPasswordReminder.ps1 -DaysToWarn 7 -Demo
+
+    Description
+    --------------
+    Query AD for any accounts with passwords that will expire in EXACTLY 7 days and print them to the screen.
+
+.EXAMPLE
+    .\New-ADPasswordReminder.ps1  -Alert -PreviewUser 'jdoe' -Company 'Contoso' -PasswordChangeURL 'https://sso.contoso.com/adfs/portal/updatepassword/' -EmailServer 'smtprelay.contoso.com' -EmailFrom 'IT ServiceDesk <servicedesk@contoso.com>' -HelpDeskPhone '(555) 555-5555' -ImagePath 'https://www.contoso.com/notices' -Install
+
+    Description
+    --------------
+    Create a new scheduled task test for the jdoe user. This will automatically assume that jdoe's password changes in a day and send a red (alert) email notification.
+
+.EXAMPLE
+    $MyCred = Get-Credential
+    .\New-ADPasswordReminder.ps1 -Company 'Contoso' -PasswordChangeURL 'https://sso.contoso.com/adfs/portal/updatepassword/' -EmailServer 'smtprelay.contoso.com' -EmailFrom 'IT ServiceDesk <servicedesk@contoso.com>' -HelpDeskPhone '(555) 555-5555' -ImagePath 'https://www.contoso.com/notices' -Install -DaysToWarn 7 -Credential $MyCred
+
+    .\New-ADPasswordReminder.ps1 -Company 'Contoso' -PasswordChangeURL 'https://sso.contoso.com/adfs/portal/updatepassword/' -EmailServer 'smtprelay.contoso.com' -EmailFrom 'IT ServiceDesk <servicedesk@contoso.com>' -HelpDeskPhone '(555) 555-5555' -ImagePath 'https://www.contoso.com/notices' -Install -DaysToWarn 3 -Alert -Credential $MyCred
+    
+    .\New-ADPasswordReminder.ps1 -Company 'Contoso' -PasswordChangeURL 'https://sso.contoso.com/adfs/portal/updatepassword/' -EmailServer 'smtprelay.contoso.com' -EmailFrom 'IT ServiceDesk <servicedesk@contoso.com>' -HelpDeskPhone '(555) 555-5555' -ImagePath 'https://www.contoso.com/notices' -Install -DaysToWarn 1 -Alert -Credential $MyCred
+
+    Description
+    --------------
+    Create a new scheduled task that will send a warning notice on a daily basis to users that have passwords that will expire in 7 days then again in 3 days. Also, create another similar task that will send an alert to users that have one more day to change their passwords.
+
+#> 
+
+[CmdletBinding(SupportsPaging = $True, DefaultParametersetName='Default')]
+param(
+    [parameter(HelpMessage='List users who would be sent notifications but do not send them.', ParameterSetName='Demo')]
+    [switch]$Demo,
+    
+    [parameter(HelpMessage='Extract embedded gifs used in the email notification. These should be served publicly.', ParameterSetName='ExtractGifs')] 
+    [switch]$ExtractGifs,
+    
+    [parameter(HelpMessage='Install this script with the passed parameters as a scheduled task.', ParameterSetName='Install')]
+    [switch]$Install,
+    
+    [parameter(HelpMessage='Credentials used for scheduled task. Needs only have AD read access and ability to run as a batch job locally.', ParameterSetName='Install')]
+    [System.Management.Automation.PSCredential]$Credential = $null,
+
+    [parameter(HelpMessage='Attempts to assign the login as batch job rights', ParameterSetName='Install')]
+    [switch]$SetupRunAsBatch,
+
+    [parameter(HelpMessage='Test processing on a single user account.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [string]$PreviewUser,
+    
+    [parameter(Mandatory=$true, HelpMessage='Days before password needs to change', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [parameter(ParameterSetName='Demo')] 
+    [int]$DaysToWarn,
+
+    [parameter(HelpMessage='Send the notice as an alert (red) instead of a warning (yellow)', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')] 
+    [switch]$Alert,
+
+    [parameter(HelpMessage='Use this switch to send notices if the expiration date is less than or equal to the days to warn. Default is to only send a notice if the DaysToWarn is equal to the expiration date.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [parameter(ParameterSetName='Demo')]
+    [switch]$LooseMatching,
+
+    [parameter(HelpMessage='Surpress a final notice warning banner if the password is due to be changed in a day.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')] 
+    [switch]$SurpressFinalNotice,
+
+    [parameter(HelpMessage='Can be used to filter checked user accounts to a specific organizational unit. Defaults to entire domain.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [string]$OU,
+
+    [parameter(Mandatory = $true, HelpMessage = 'Your company name.', ParameterSetName='Default')]
+    [parameter(Mandatory=$True, ParameterSetName='Install')]
+    [string]$Company,
+
+    [parameter(Mandatory = $true, HelpMessage = 'This can be an owa password change url or possibly an sso password change url', ParameterSetName='Default')]
+    [parameter(Mandatory=$True, ParameterSetName='Install')]
+    [string]$PasswordChangeURL,
+
+    [parameter(Mandatory=$True, HelpMessage = 'Your email relay', ParameterSetName='Default')]
+    [parameter(Mandatory=$True, ParameterSetName='Install')]
+    [string]$EmailServer,
+
+    [parameter(Mandatory=$True, HelpMessage = 'Where the email is seen to come from', ParameterSetName='Default')]
+    [parameter(Mandatory=$True, ParameterSetName='Install')]
+    [string]$EmailFrom,
+
+    [parameter(HelpMessage = 'Your helpdesk phone number. Leave blank to exlcude from email notifications', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [string]$HelpDeskPhone = '',
+
+    [parameter(HelpMessage = 'Web URL of your helpdesk system. Leave blank to exclude from email notifications.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [string]$HelpDeskURL = '',
+
+    [parameter(HelpMessage = 'Below path should be accessible by ALL users who may receive emails. This includes external/mobile users. Leave blank to send emails without images.', ParameterSetName='Default')]
+    [parameter(ParameterSetName='Install')]
+    [string]$ImagePath
+)
+
+if ($Alert) {
+    $NotificationType = 'Alert'
+}
+Else {
+    $NotificationType = 'Warning'
+}
+$TaskName = "AD Password Expiration Notification ($DaysToWarn Day $NotificationType)"
+$TaskDesc = "Send a password change $NotificationType $DaysToWarn before it expires"
+if ($LooseMatching) {
+    $TaskDesc += " and every day thereafter until it has been updated"
+}
+
+# Change the following to alter the format of the date in the emails sent
+# See http://technet.microsoft.com/en-us/library/ee692801.aspx for more info
+$DateFormat = "d"
+
+# If we are in 'alert' mode then the notification header/footer will be red, otherwise it will be yellow
+if ($Alert) {
+    $AlertLevel = 'red'
+}
+else {
+    $AlertLevel = 'yellow'
+}
+
+$Script:UsersNotified = 0
+$Script:UserIDsNotified = @()
+
+function New-ScheduledPowershellTask {
+    <#
+    .SYNOPSIS
+    Create a scheduled task.
+    .DESCRIPTION
+    Create a scheduled task.
+    .PARAMETER TaskName
+    Name of the task to create in task scheduler
+    .PARAMETER 
+
+    .LINK
+    http://www.the-little-things.net
+    .LINK
+    https://github.com/zloeber/Powershell/
+    .NOTES
+    Last edit   :   
+    Version     :   
+    Author      :   Zachary Loeber
+
+    .EXAMPLE
+
+    Description
+    -----------
+    TBD
+    #>
+    [CmdLetBinding()]
+    param(
+        [Parameter(Position=0, HelpMessage='Task name. If not set a random GUID will be used for the task name.')]
+        [string]$TaskName,
+        [Parameter(Position=1, HelpMessage='Task folder (in task manager).')]
+        [string]$TaskFolder = '\',
+        [Parameter(Position=2, HelpMessage='Task description.')]
+        [string]$TaskDescription,
+        [Parameter(Position=3, HelpMessage='Task frequency (2 = daily, 3 = weekly).')]
+        [int]$TaskFrequency = 2,
+        [Parameter(Position=4, HelpMessage='Task days to run if freqency is set to weekly.')]
+        [int]$TaskDaysOfWeek = 0,
+        [Parameter(Position=5, HelpMessage='User to run the task as. If not set then it will run as the current logged in user.')]
+        [string]$TaskUser,
+        [Parameter(Position=6, HelpMessage='Password of user running the task.')]
+        [string]$TaskPassword,
+        [Parameter(Position=7, HelpMessage='Task login type. Should be TASK_LOGON_PASSWORD if you are passing credentials. Otherwise defaults to TASK_LOGON_SERVICE_ACCOUNT.')]
+        [ValidateSet('TASK_LOGON_NONE','TASK_LOGON_PASSWORD','TASK_LOGON_INTERACTIVE_TOKEN','TASK_LOGON_SERVICE_ACCOUNT')]
+        [string]$TaskLoginType = 'TASK_LOGON_SERVICE_ACCOUNT',
+        [Parameter(Position=8, HelpMessage='Task script.')]
+        [string]$TaskScript,
+        [Parameter(Position=8, HelpMessage='Path to run the scheduled task within.')]
+        [string]$TaskRunPath,
+        [Parameter(Position=9, HelpMessage='Powershell arguments.')]
+        [string]$PowershellArgs = '-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -NoProfile',
+        [Parameter(Position=10, HelpMessage='Task Script Arguments.')]
+        [string]$TaskScriptArgs,
+        [Parameter(Position=11, HelpMessage='Task Start Time (defaults to 3AM tonight).')]
+        [datetime]$TaskStartTime = $(Get-Date "$(((Get-Date).AddDays(1)).ToShortDateString()) 3:00 AM")
+    )
+    begin {
+        # The Task Action command
+        $TaskCommand = "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe"
+
+        # The Task Action command argument
+        $TaskArg = "$PowershellArgs `"& `'$TaskScript`' $TaskScriptArgs`""
+        
+        switch ($TaskLoginType) {
+            'TASK_LOGON_NONE' { $_TaskLoginType = 0 }
+            'TASK_LOGON_PASSWORD' { $_TaskLoginType = 1 }
+            'TASK_LOGON_INTERACTIVE_TOKEN' { $_TaskLoginType = 3 }
+            default { $_TaskLoginType = 5 }
+        }
+ 
+    }
+    process {}
+    end {
+        try {
+            # attach the Task Scheduler com object
+            $service = new-object -ComObject('Schedule.Service')
+            # connect to the local machine. 
+            # http://msdn.microsoft.com/en-us/library/windows/desktop/aa381833(v=vs.85).aspx
+            $service.Connect()
+            $rootFolder = $service.GetFolder($TaskFolder)
+             
+            $TaskDefinition = $service.NewTask(0) 
+            $TaskDefinition.RegistrationInfo.Description = "$TaskDescription"
+            $TaskDefinition.Settings.Enabled = $true
+            $TaskDefinition.Settings.AllowDemandStart = $true
+             
+            $triggers = $TaskDefinition.Triggers
+            #http://msdn.microsoft.com/en-us/library/windows/desktop/aa383915(v=vs.85).aspx
+            $trigger = $triggers.Create($TaskFrequency)
+            $trigger.StartBoundary = $TaskStartTime.ToString("yyyy-MM-dd'T'HH:mm:ss")
+            $trigger.Enabled = $true
+            if ($TaskFrequency -eq 3) {
+                $trigger.DaysOfWeek = [Int16]$TaskDaysOfWeek
+            }
+             
+            # http://msdn.microsoft.com/en-us/library/windows/desktop/aa381841(v=vs.85).aspx
+            $Action = $TaskDefinition.Actions.Create(0)
+            $action.Path = "$TaskCommand"
+            $action.Arguments = "$TaskArg"
+            if ($TaskRunPath) {
+                $Action.WorkingDirectory = $TaskRunPath
+            }
+
+            #http://msdn.microsoft.com/en-us/library/windows/desktop/aa381365(v=vs.85).aspx
+            $null = $rootFolder.RegisterTaskDefinition("$TaskName",$TaskDefinition,6,$TaskUser,$TaskPassword,$_TaskLoginType)
+        }
+        catch {
+            throw
+        }
+    }
+}
+
+Function Add-UserToLocalSecurityRight {
+    <#
+    .SYNOPSIS
+    When run administratively this will add a user to the local system's login local rights security policy.
+    .DESCRIPTION
+    When run administratively this will add a user to the local system's login local rights security policy.
+    .PARAMETER UserID
+    User ID to add to the local system's login local rights security policy.
+    .PARAMETER LocalRight
+    Local right to grant. Either 'LogonAsBatch' or 'LogonLocal'
+    .LINK
+    http://www.the-little-things.net   
+    .NOTES
+    Version:
+        1.0.0 - Initial release
+        1.0.1 - Updated to include logon local right and parameter to select the right to assign.
+    Author:
+        Zachary Loeber
+    Respect: 
+        Code mildy modified from 
+        http://www.morgantechspace.com/2014/03/Set-Logon-as-batch-job-rights-to-User-by-Powershell-CSharp-CMD.html
+
+    .EXAMPLE
+    Add-UserToLoginAsBatch 'test.user' -LogonRight 'LogonAsBatch'
+
+    Description
+    -----------
+    Adds the local user test.user to the login as batch job rights on the local machine.
+    #>
+    [CmdletBinding()]
+    param(
+        [parameter()]
+        [string]$UserID,
+        [parameter()]
+        [ValidateSet('LogonAsBatch','LogonLocal')]
+        [string]$LocalRight = 'LogonAsBatch'
+    )
+    
+    $CSharpCode = @'
+    using System;
+    // using System.Globalization;
+    using System.Text;
+    using System.Runtime.InteropServices;
+    public class LsaWrapper
+    {
+    // Import the LSA functions
+     
+    [DllImport("advapi32.dll", PreserveSig = true)]
+    private static extern UInt32 LsaOpenPolicy(
+        ref LSA_UNICODE_STRING SystemName,
+        ref LSA_OBJECT_ATTRIBUTES ObjectAttributes,
+        Int32 DesiredAccess,
+        out IntPtr PolicyHandle
+        );
+     
+    [DllImport("advapi32.dll", SetLastError = true, PreserveSig = true)]
+    private static extern long LsaAddAccountRights(
+        IntPtr PolicyHandle,
+        IntPtr AccountSid,
+        LSA_UNICODE_STRING[] UserRights,
+        long CountOfRights);
+     
+    [DllImport("advapi32")]
+    public static extern void FreeSid(IntPtr pSid);
+     
+    [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true, PreserveSig = true)]
+    private static extern bool LookupAccountName(
+        string lpSystemName, string lpAccountName,
+        IntPtr psid,
+        ref int cbsid,
+        StringBuilder domainName, ref int cbdomainLength, ref int use);
+     
+    [DllImport("advapi32.dll")]
+    private static extern bool IsValidSid(IntPtr pSid);
+     
+    [DllImport("advapi32.dll")]
+    private static extern long LsaClose(IntPtr ObjectHandle);
+     
+    [DllImport("kernel32.dll")]
+    private static extern int GetLastError();
+     
+    [DllImport("advapi32.dll")]
+    private static extern long LsaNtStatusToWinError(long status);
+     
+    // define the structures
+     
+    private enum LSA_AccessPolicy : long
+    {
+        POLICY_VIEW_LOCAL_INFORMATION = 0x00000001L,
+        POLICY_VIEW_AUDIT_INFORMATION = 0x00000002L,
+        POLICY_GET_PRIVATE_INFORMATION = 0x00000004L,
+        POLICY_TRUST_ADMIN = 0x00000008L,
+        POLICY_CREATE_ACCOUNT = 0x00000010L,
+        POLICY_CREATE_SECRET = 0x00000020L,
+        POLICY_CREATE_PRIVILEGE = 0x00000040L,
+        POLICY_SET_DEFAULT_QUOTA_LIMITS = 0x00000080L,
+        POLICY_SET_AUDIT_REQUIREMENTS = 0x00000100L,
+        POLICY_AUDIT_LOG_ADMIN = 0x00000200L,
+        POLICY_SERVER_ADMIN = 0x00000400L,
+        POLICY_LOOKUP_NAMES = 0x00000800L,
+        POLICY_NOTIFICATION = 0x00001000L
+    }
+     
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_OBJECT_ATTRIBUTES
+    {
+        public int Length;
+        public IntPtr RootDirectory;
+        public readonly LSA_UNICODE_STRING ObjectName;
+        public UInt32 Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+     
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_UNICODE_STRING
+    {
+        public UInt16 Length;
+        public UInt16 MaximumLength;
+        public IntPtr Buffer;
+    }
+    /// 
+    //Adds a privilege to an account
+     
+    /// Name of an account - "domain\account" or only "account"
+    /// Name of the privilege
+    /// The windows error code returned by LsaAddAccountRights
+    public long SetRight(String accountName, String privilegeName)
+    {
+        long winErrorCode = 0; //contains the last error
+     
+        //pointer an size for the SID
+        IntPtr sid = IntPtr.Zero;
+        int sidSize = 0;
+        //StringBuilder and size for the domain name
+        var domainName = new StringBuilder();
+        int nameSize = 0;
+        //account-type variable for lookup
+        int accountType = 0;
+     
+        //get required buffer size
+        LookupAccountName(String.Empty, accountName, sid, ref sidSize, domainName, ref nameSize, ref accountType);
+     
+        //allocate buffers
+        domainName = new StringBuilder(nameSize);
+        sid = Marshal.AllocHGlobal(sidSize);
+     
+        //lookup the SID for the account
+        bool result = LookupAccountName(String.Empty, accountName, sid, ref sidSize, domainName, ref nameSize,
+                                        ref accountType);
+     
+        //say what you're doing
+        Console.WriteLine("LookupAccountName result = " + result);
+        Console.WriteLine("IsValidSid: " + IsValidSid(sid));
+        Console.WriteLine("LookupAccountName domainName: " + domainName);
+     
+        if (!result)
+        {
+            winErrorCode = GetLastError();
+            Console.WriteLine("LookupAccountName failed: " + winErrorCode);
+        }
+        else
+        {
+            //initialize an empty unicode-string
+            var systemName = new LSA_UNICODE_STRING();
+            //combine all policies
+            var access = (int) (
+                                    LSA_AccessPolicy.POLICY_AUDIT_LOG_ADMIN |
+                                    LSA_AccessPolicy.POLICY_CREATE_ACCOUNT |
+                                    LSA_AccessPolicy.POLICY_CREATE_PRIVILEGE |
+                                    LSA_AccessPolicy.POLICY_CREATE_SECRET |
+                                    LSA_AccessPolicy.POLICY_GET_PRIVATE_INFORMATION |
+                                    LSA_AccessPolicy.POLICY_LOOKUP_NAMES |
+                                    LSA_AccessPolicy.POLICY_NOTIFICATION |
+                                    LSA_AccessPolicy.POLICY_SERVER_ADMIN |
+                                    LSA_AccessPolicy.POLICY_SET_AUDIT_REQUIREMENTS |
+                                    LSA_AccessPolicy.POLICY_SET_DEFAULT_QUOTA_LIMITS |
+                                    LSA_AccessPolicy.POLICY_TRUST_ADMIN |
+                                    LSA_AccessPolicy.POLICY_VIEW_AUDIT_INFORMATION |
+                                    LSA_AccessPolicy.POLICY_VIEW_LOCAL_INFORMATION
+                                );
+            //initialize a pointer for the policy handle
+            IntPtr policyHandle = IntPtr.Zero;
+     
+            //these attributes are not used, but LsaOpenPolicy wants them to exists
+            var ObjectAttributes = new LSA_OBJECT_ATTRIBUTES();
+            ObjectAttributes.Length = 0;
+            ObjectAttributes.RootDirectory = IntPtr.Zero;
+            ObjectAttributes.Attributes = 0;
+            ObjectAttributes.SecurityDescriptor = IntPtr.Zero;
+            ObjectAttributes.SecurityQualityOfService = IntPtr.Zero;
+     
+            //get a policy handle
+            uint resultPolicy = LsaOpenPolicy(ref systemName, ref ObjectAttributes, access, out policyHandle);
+            winErrorCode = LsaNtStatusToWinError(resultPolicy);
+     
+            if (winErrorCode != 0)
+            {
+                Console.WriteLine("OpenPolicy failed: " + winErrorCode);
+            }
+            else
+            {
+                //Now that we have the SID an the policy,
+                //we can add rights to the account.
+     
+                //initialize an unicode-string for the privilege name
+                var userRights = new LSA_UNICODE_STRING[1];
+                userRights[0] = new LSA_UNICODE_STRING();
+                userRights[0].Buffer = Marshal.StringToHGlobalUni(privilegeName);
+                userRights[0].Length = (UInt16) (privilegeName.Length*UnicodeEncoding.CharSize);
+                userRights[0].MaximumLength = (UInt16) ((privilegeName.Length + 1)*UnicodeEncoding.CharSize);
+     
+                //add the right to the account
+                long res = LsaAddAccountRights(policyHandle, sid, userRights, 1);
+                winErrorCode = LsaNtStatusToWinError(res);
+                if (winErrorCode != 0)
+                {
+                    Console.WriteLine("LsaAddAccountRights failed: " + winErrorCode);
+                }
+     
+                LsaClose(policyHandle);
+            }
+            FreeSid(sid);
+        }
+     
+        return winErrorCode;
+    }
+    }
+    
+    public class AddUserLocalRight
+    {
+        public static void GrantUserLogonAsBatchJob(string userName)
+        {
+            try
+            {
+                LsaWrapper lsaUtility = new LsaWrapper();
+         
+                lsaUtility.SetRight(userName, "SeBatchLogonRight");
+         
+                Console.WriteLine("Logon as batch job right is granted successfully to " + userName);
+            }            
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+        }
+        public static void GrantUserLogonLocal(string userName)
+        {
+            try
+            {
+                LsaWrapper lsaUtility = new LsaWrapper();
+         
+                lsaUtility.SetRight(userName, "SeInteractiveLogonRight");
+         
+                Console.WriteLine("Logon local right is granted successfully to " + userName);
+            }            
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+        }
+    }
+'@
+    try {
+        Add-Type -ErrorAction Stop -Language:CSharpVersion3 -TypeDefinition $CSharpCode
+    }
+    catch {
+        Write-Error $_.Exception.Message
+        break
+    }
+    if ($LocalRight -eq 'LogonAsBatch') {
+        [AddUserLocalRight]::GrantUserLogonAsBatchJob($UserID)
+    }
+    if ($LocalRight -eq 'LogonLocal') {
+        [AddUserLocalRight]::GrantUserLogonLocal($UserID)
+    }
+}
+
+$ScriptName = $MyInvocation.MyCommand.Name
+$ScriptPathAndName = $MyInvocation.MyCommand.Definition
+
+if ($install){
+    Write-Output "..Attempting to setup a scheduled task"
+    
+    # First lets collect all the used parameters and recreate the flags we passed to the script
+    $UnusedParams = @('Install','Demo','Credential')
+    $ParameterString = ''
+    $MyParams = $PSCmdlet.MyInvocation.BoundParameters 
+    $MyParams.Keys | Where {$UnusedParams -notcontains $_} | ForEach {
+        Write-Verbose "..Adding parameter $($_)"
+        $ParamName = $_
+        $ParamType = $MyParams[$_].GetType().Name
+        $ParamValue = $MyParams[$_]
+        switch ($ParamType) {
+            'SwitchParameter' {
+                $ParameterString += " -$($ParamName)"
+            }
+            default {
+                $AddQuotes = ''
+                if ($ParamType -eq 'String') {
+                    $AddQuotes = "'"
+                }
+                $ParameterString += " -$($ParamName) $($AddQuotes)$($ParamValue)$($AddQuotes)"
+            }
+        }
+    }
+    # Install the scheduled task with the parameters that were passed.
+   if ($Credential -eq $null) {
+       $Credential = Get-Credential("$env:userdnsdomain\$env:username")
+   }
+   $TaskPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password))
+
+   if ($SetupRunAsBatch) {
+       try {
+           Add-UserToLocalSecurityRight -UserID $Credential.UserName -LocalRight 'LogonAsBatch'
+           Write-Output "Added $($Credential.UserName) to the local logon as batch job rights."
+       }
+       catch {
+           Write-Warning "Wasn't able to add $($Credential.UserName) to the local logon as batch job rights!"
+       }
+        try {
+           Add-UserToLocalSecurityRight -UserID $Credential.UserName -LocalRight 'LogonLocal'
+           Write-Output "Added $($Credential.UserName) to the allow local logon rights."
+       }
+       catch {
+           Write-Warning "Wasn't able to add $($Credential.UserName) to the local logon rights!"
+       }
+   }
+
+    $ScheduledTaskParams = @{
+        'TaskName' = $TaskName
+        'TaskDescription' = $TaskDesc
+        'TaskUser' = $Credential.UserName
+        'TaskPassword' = $TaskPassword
+        'TaskScriptArgs' = $ParameterString
+        'TaskLoginType' = 'TASK_LOGON_PASSWORD'
+        'TaskScript' = $ScriptPathAndName
+    }
+
+    try {
+        New-ScheduledPowershellTask @ScheduledTaskParams
+        Write-Output "Task has been scheduled to run at 3AM every day"
+    }
+    catch {
+        Write-Output "Uh Oh, we ran into an issue scheduling this script to run via task scheduler :("
+    }
+    Exit
+}
+
+function ExtractEmbeddedGifs {
+    $decode_footer_red= "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"
+    $decode_footer_yellow= "R0lGODlhjwJRAPcAAKuyfby5ZNy6M+G+HeKzKu67MfG2J966Y9WyfNrHJNbFPe3IGvXLDvTOCvvOC/rPDvHAG/fKFvrTBP3VAv7WAfrQCf/YAOvGO/PNJNDDXOjDWpmAmZmqmbm4jKmxqpmAzJmqzMyqmdy4itSxqcyAzMyqzMzVmf/xpMzVzMzV/8z/zMz////VzP/V////zP///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAjwJRAAAI/wA5vBhIsKDBgwgTKlzIsKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihx5EYVJFCpOolSZ8mRLky9RlJBJEwQHECRz6tzJs6fPn0CDCh1K9KdKlSZQhFBawkSJpSGaPmXqFGoJDkuxouDQlIPXr2DDih1LNoTNomjTql3Ltq3bt3AZHp2rYqZdmVxv5rV51WuIr3/J6rVJeLDhwogNGy7BtzFXx4wfS45M2THOuJgza97MuXNbFykGgn7h4kVokyxSoFaNIrXKmSZhH3Valang22Jt5r35l6/eq74r7+0duK9ZrLy9Ggfx96rzvH2jK5++W3p16tI9a9/Ovbv3jytesP94scJFixcqWqRfrx5Fi5PvTz6fD72+c+DO+Ub9zd/3hq//AQhWYXrxxtyBZpl14IIKNnjgdL7V96BNxx0n3YPAWWjghgT2pRthx4GIWIgcljjhdyimqOKKIIHmYgqlofCCjDSq996MLMgnn308ArfXjx6GeNxXuhWIG25FIhfWhEI6piGTiTGnV4UUVmkglT/6NuFuInqlpZdDMplXkwlKWWVvWJmZJpoJTskcABkEoIFALNZp551wsaenezSiNhdNW5XAmKCDDhYmkUYieqRYgSmpZqPKSclYcxv6aOmVheV3U34aZqglcVZySemlan4ZJqhgXjemiGg+x5sHFwT/EKcGASjQwQUKZHBBBrnuumuvuQarQbC68jqsscTuCkEByzbLrAMWUGABnXhWa+21C5U2UI0qpObCn6/ZRyqXEO62pGB/NXqVhl6RsGGZwy34mIPy+qjgY31x+OST17Ga3JaHlvijoWYK+S+Qad6EQAYAlAknrsX+2iuyvCowrALMZrzsABpD+0C0FnwsrQUkl2zyySinrPLKJ1+G7cswxyXjjDP6Ce5J8zIX2WGVejlgWI0GptuQBX5g1gbSPScvCFsGaWqXW4p6sKhDV21vfwdfuGZ/VLKJ4JlUJwinrAfE+euxGEPg7NoQRGBBBARAYAAE0LJs991456333iRT/xvz34BbpC3Nfd6M13z3+RxhgAH6nGiFfj3Y6df03qt0jz1/SJzUTlOd9XRKk/j1qpPddKZvcCpQNrDH/vorr7oqIPvsFesqAK4FKHDB7QrwnrvGGrst7fB8F2/88cgnb7LLgTdv7WgvspDeUbDNd+C6IFhXZOOCgf3b9fPyqKW9IE5ZYKjl66b1+V6zGxzBnsMbXerBWhyAALzuPjvGs+cu++4ZE0ABElCA2wmwAiSbgPIWyMAGOvCBDfSb8yaYlsHJ6EUuOopZAgUdnWXPcTbhHvdy85UM5SxnnEIfvM6XsA+Rjl8mZFqZyBQvdtHHRGYBgMX2h7/f8c+Au9NfAf+HKEABuA1lCoSgEpfIxCY6UXnMo6AUOVIaGBEORyvIkUo+iLjETCpJtylYwnwEmZ55iFxnZKGnTkW58l0ufQkzmJl0KAJbxSoDAuCfDwsYRAMW4I8CWNsA2vbEQhrykIhMpAMlOMVGFoRGhGsP9VDAxUJFiTroQk6SUhivFjYpOfnyVAslJD8e8Wt0IPKAAkagF1UqoI7DEqIeiwjI3wXSbQpU4McUycte+vKXwDReFB2Jp9LYSE/xwZlMfFSgG94mXX7Jy3/GZyIJNZNrERITlNwEymtykwMjUICsbLU/3WFMgBxjFgQEgMAKZAyBFpBAMOdJz3ra8554YyQxM+O1IhuZpGbU4yIIS5gqwEgpURv4Gn2Ytqlrho5gbXLjjz7pPlSBk5yvw13v+ljAZRWAY81agAWSmER8mvSkKE2pSi0wzH0GhT3g4soyP6iXEY7QTaPCob846UKJYoqFvjkU9n4EAFrpSk6yq53s9gjSAiCwpCuNqlSnSlWV6tOlFzFPed4zvddw8IYP4sBNCWoWTnKKXN68nOjYV59SAgxBF4XdUmOXRz4KEGMI3CVUq8rXvvr1r//4bClWSTMQFoTHsIhViUw59UWv/GesRjLhFy+VRheSEaKjI5/Bbmip1OHqf3m8gC2JCE/Amva0qE3tSa8aMxddsXCFmtQb/wJZsIhyjaMbmPoWg7kxWdOFeYGVB24CAI0C0XeBXBY7Vcvc5jr3ufYUbIoOm8XqapEmgspeZYmWycFcVjiijBrUZgg2ZqrJRx4Y1jhFizHREhEDFnAnIaFL3/ra9769ZG1cEJtF1VxXJvvRbRjTVaQn4cd0zwHVkNIYw7bCMXP046gAO8oseO4VvxjOsIY3zETpCqVPydzRzopEoAEVZ02falrpStWmwTytm2oK5w7z5z+M/fGjzAL/aWk5zOMe+/jHD9QvFQk3l7twJV8+u2mbEvzBJmdJX7tl8Lss69urFFVWEAviOZvFACB7+ctgDvMDPfyQrXZVR/hqLJLPBVdLhZVAu5UUf4LETc0RFW2+kt1xITAAXIr5z4AOtKD5pl/DmicmduFKWZOMm85RjlxwxRR5wWTnKCsMWbsblh93t+NBe/rToA51ynASo9hAx1NrFsty9oJbKAO1Ptiss9iQpbvbjXa5os61rnfNa96SRTcJZbWrY0giyYIO1sGBEwB0WAAt23JZDeC1tKdNbV7TVl0GaqMNuWneU1EnlfvbI2nje8Rqm/vc6A61ZVz9zRRDyCwIUIAHVopqzgwM8Y9qI0Cn083vfvv70wuW2umu9LBgsdePIo3Avv/N8IY7XNDazOHFKtZsA8734RjPuMZBvT9cWXzhGw+5yEdO8pKb/OQoT7nKV87ylrv85TCPWLnMZ07zmtv85jjPuc53zvOe+/znQA+60IdO9KIb/ehIT7rSl870pjv96VCPutSnTvWqW/3qWM+61rfO9a57/etgD7vYx072spv97GhPu9rXzva2u/3tcI+Ou9znTve62/3ueM+73vfO9777/e+AD7zgB0/4whv+8IhPvOIXz/jGO161J4i85CdP+cpb/vKYz7zmN8/5znv+86APvehHT/rSm/70qE+96lfP+ta7/vWwj73sUT/Y2tv+9rjPve53z/ve+/73wA++8IdP/OIb//jIT77yl8/85jv/+dCPvvSnT/3qW//62DbPvva3z/3ue//74A+/+MdP/vKb//zoT7/618/+9rv//fCPv/znT//62//++M+//vfP//6rPyAAOw=="
+    $decode_header_red= "R0lGODlhjwJ5AEAAACH5BAAAAAAALAAAAACPAnkAhwAAAAAAMwAAZgAAmQAAzAAA/wArAAArMwArZgArmQArzAAr/wBVAABVMwBVZgBVmQBVzABV/wCAAACAMwCAZgCAmQCAzACA/wCqAACqMwCqZgCqmQCqzACq/wDVAADVMwDVZgDVmQDVzADV/wD/AAD/MwD/ZgD/mQD/zAD//zMAADMAMzMAZjMAmTMAzDMA/zMrADMrMzMrZjMrmTMrzDMr/zNVADNVMzNVZjNVmTNVzDNV/zOAADOAMzOAZjOAmTOAzDOA/zOqADOqMzOqZjOqmTOqzDOq/zPVADPVMzPVZjPVmTPVzDPV/zP/ADP/MzP/ZjP/mTP/zDP//2YAAGYAM2YAZmYAmWYAzGYA/2YrAGYrM2YrZmYrmWYrzGYr/2ZVAGZVM2ZVZmZVmWZVzGZV/2aAAGaAM2aAZmaAmWaAzGaA/2aqAGaqM2aqZmaqmWaqzGaq/2bVAGbVM2bVZmbVmWbVzGbV/2b/AGb/M2b/Zmb/mWb/zGb//5kAAJkAM5kAZpkAmZkAzJkA/5krAJkrM5krZpkrmZkrzJkr/5lVAJlVM5lVZplVmZlVzJlV/5mAAJmAM5mAZpmAmZmAzJmA/5mqAJmqM5mqZpmqmZmqzJmq/5nVAJnVM5nVZpnVmZnVzJnV/5n/AJn/M5n/Zpn/mZn/zJn//8wAAMwAM8wAZswAmcwAzMwA/8wrAMwrM8wrZswrmcwrzMwr/8xVAMxVM8xVZsxVmcxVzMxV/8yAAMyAM8yAZsyAmcyAzMyA/8yqAMyqM8yqZsyqmcyqzMyq/8zVAMzVM8zVZszVmczVzMzV/8z/AMz/M8z/Zsz/mcz/zMz///8AAP8AM/8AZv8Amf8AzP8A//8rAP8rM/8rZv8rmf8rzP8r//9VAP9VM/9VZv9Vmf9VzP9V//+AAP+AM/+AZv+Amf+AzP+A//+qAP+qM/+qZv+qmf+qzP+q///VAP/VM//VZv/Vmf/VzP/V////AP//M///Zv//mf//zP///wAAAAAAAAAAAAAAAAj/AF+9wiaQ4MCCCA8qNMgwYcOFDiNCnPiwokSLFC9qzMgRo8eNHzuCHCmyZMiTJFGaTMlypUuVMFvGfCmzJs2bM3Pa1Ilzp8NUrrIBFRp0qNGiSIkqPbo0KdOnTqM2nQqVqtSqWK9qtco1a9etXsOCHfu1rFizZM+qTcsWrdu1b9vCnSu3bty7dPHazQvUoKuDfwn+DTo422DAiAm/Uhx4cWLDiyE3nhy58GHBjy07xoyZsWTEnSV/5uzY8+XNpUWfpmwaNWvVrjNXjh1aM+Xas2+ntg16d+7etkfHbq07+GrZjIHnFv6aN2njtH0nf778OO7pw2EXrx4d+nbiysFT/xef3Xn53+O1h1fvd9rAoajeG071Piiq+e/fE4yPjX7/+fbJ54p/8OHXn36v8EcggNkoaGCBA+bX334SpsKggxH2Z9+DCCooIHwf1tcghxMmWOGFIWo4YoYEUnjgfwMGCCOBG7LY4YkxNpgihATe+KKFOWJI44o9lujhjDICOeR9NhqJI4gzishkkam4uGCQO9ZIpZUfJvmglhVyiaSOUao4ZZgm/ohimTyieaSSXrII5o9iwkmmklKSWGWaV0KJp5l61jkfNgSJltBk2Tj2imGQYbboX8JBlqhmBkUGGGSWZpaoQogqyihlj4bamKS+VRrUpX9lWtumfl3qqWKOSv96GqmUCmSpYJiequmhrqb6KWKhRgppqbaeimuquq7KK66vNvqqqAfROpupiR4rULK7sXptrwL9Giuksw5b67XVzqZqtsta6iuszwq7KLHkohrvrpxy+6iz60JbqLjTFluuYudapq1rk3bLbr7uFsxuvNYGbK6HrkzzlzQVFkXhKxRjLGWXr0issY53UhjxYhIrFd+IJkY8ccVCXZwxxWZy7DHFICsosnsqm7zofSnPzPKe8WmsccxIdrxyzTeOnDOIKMen8tBDAi3QyxsX7TPSTipdMtM8O+3zjxabKDTMfgJo9Mcn29wzyUmlnajXK4PdsthUEw3n2TSnnTTOWwf/2DTbUIso9dhV33213lnz3fbObwNOtuAuT1242YfvvDfbOv/99OMqDl532THibXnIay/td9eLlotYrrKi9pC6Cv/7mbTRNkYwsom2Pptwr5/q+62/0b5vvQ2fqrtivCcEe2rygvtuqsO3Wnzuzu9+Wu+Txt58sIpGv+30weLufGPYqwt8csKHKr25xleP/PXK+669tc4XXDvx7FMfqvWux5898/TjHvTU9738hY9c4ztI+X5nrODx637rA1j79ve+/ilkeYXZXvqcdTuEGOYvQEsU1e7EMYrlTG9EIhnmFLQhuqlQblNa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"
+    $decode_header_yellow= "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"
+    $decode_image001b= "R0lGODlhJAAcAEAAACH5BAAAAAAALAAAAAAkABwAhwAAAAAAMwAAZgAAmQAAzAAA/wArAAArMwArZgArmQArzAAr/wBVAABVMwBVZgBVmQBVzABV/wCAAACAMwCAZgCAmQCAzACA/wCqAACqMwCqZgCqmQCqzACq/wDVAADVMwDVZgDVmQDVzADV/wD/AAD/MwD/ZgD/mQD/zAD//zMAADMAMzMAZjMAmTMAzDMA/zMrADMrMzMrZjMrmTMrzDMr/zNVADNVMzNVZjNVmTNVzDNV/zOAADOAMzOAZjOAmTOAzDOA/zOqADOqMzOqZjOqmTOqzDOq/zPVADPVMzPVZjPVmTPVzDPV/zP/ADP/MzP/ZjP/mTP/zDP//2YAAGYAM2YAZmYAmWYAzGYA/2YrAGYrM2YrZmYrmWYrzGYr/2ZVAGZVM2ZVZmZVmWZVzGZV/2aAAGaAM2aAZmaAmWaAzGaA/2aqAGaqM2aqZmaqmWaqzGaq/2bVAGbVM2bVZmbVmWbVzGbV/2b/AGb/M2b/Zmb/mWb/zGb//5kAAJkAM5kAZpkAmZkAzJkA/5krAJkrM5krZpkrmZkrzJkr/5lVAJlVM5lVZplVmZlVzJlV/5mAAJmAM5mAZpmAmZmAzJmA/5mqAJmqM5mqZpmqmZmqzJmq/5nVAJnVM5nVZpnVmZnVzJnV/5n/AJn/M5n/Zpn/mZn/zJn//8wAAMwAM8wAZswAmcwAzMwA/8wrAMwrM8wrZswrmcwrzMwr/8xVAMxVM8xVZsxVmcxVzMxV/8yAAMyAM8yAZsyAmcyAzMyA/8yqAMyqM8yqZsyqmcyqzMyq/8zVAMzVM8zVZszVmczVzMzV/8z/AMz/M8z/Zsz/mcz/zMz///8AAP8AM/8AZv8Amf8AzP8A//8rAP8rM/8rZv8rmf8rzP8r//9VAP9VM/9VZv9Vmf9VzP9V//+AAP+AM/+AZv+Amf+AzP+A//+qAP+qM/+qZv+qmf+qzP+q///VAP/VM//VZv/Vmf/VzP/V////AP//M///Zv//mf//zP///wAAAAAAAAAAAAAAAAj/APcJHDiQ3jBwtVy5wlbL1jB6A9stnIiN4kKCBW25+obtm0eP3rK5sgVxHz2LFVO6wrhv2MaPHmvB/ObNVa+BKClirJVtpkxw32TC9GZL4EmVKgnaglnOIzh6EM15lPoNnLdaAiUivSiQl7ePtsohLLlPGVOgr4QJBDexrVFX4HaBK0f1m7KB+mxJNbdUrCt3JlFiEyh0LlCptcjSCzr3296gWS2udFfLsNhyvDzeFGh2rjlwmRHf3VdRZ+ZvvMCZq/V5tbmBvYLuFXu66L5a2JLWYn35M92q0Lo6/px6L0J9+yRSpHxYL+q5S0tWLhfWsdjVtQBrndiOlrnUmM2J/wf9jZhJ16q/g/5cq11ZpMNezZxJy338mPO/uRom0GI7abmlhJQ0RZmzUIACLoSKe/QgRQ8qBwLoCoC5bbSPLRJWROGBrrhHjEVHUVRhSgsmhOCIKd3VDlK3oaKSRdIoFKNCNKokDVb78NLWYNvltB897dTiYoAUocLfPvoltQ+EFbmoEDYLRqQQhBNRKZA7KAnUy5NcuoLKa1dK9iQvAnmz1UBCuiLSK2310o5LNL5SkUg4KseiUaVNxKaTXmIjZ1uoQFTPVhURpIyLbKZkopq0KJSoK9LlNBhB9OC20StCfsOmnK9kU9ErJQ0zokUsXdhnSBsxpBKZkRHKFUv1CB6TJpRN1iJMPQOJuiOppRZkEC/DtEOWQMTEuBVFAQEAOw=="
+    $decode_image005b= "R0lGODlhDgAcAEAAACH5BAAAAAAALAAAAAAOABwAhwAAAAAAMwAAZgAAmQAAzAAA/wArAAArMwArZgArmQArzAAr/wBVAABVMwBVZgBVmQBVzABV/wCAAACAMwCAZgCAmQCAzACA/wCqAACqMwCqZgCqmQCqzACq/wDVAADVMwDVZgDVmQDVzADV/wD/AAD/MwD/ZgD/mQD/zAD//zMAADMAMzMAZjMAmTMAzDMA/zMrADMrMzMrZjMrmTMrzDMr/zNVADNVMzNVZjNVmTNVzDNV/zOAADOAMzOAZjOAmTOAzDOA/zOqADOqMzOqZjOqmTOqzDOq/zPVADPVMzPVZjPVmTPVzDPV/zP/ADP/MzP/ZjP/mTP/zDP//2YAAGYAM2YAZmYAmWYAzGYA/2YrAGYrM2YrZmYrmWYrzGYr/2ZVAGZVM2ZVZmZVmWZVzGZV/2aAAGaAM2aAZmaAmWaAzGaA/2aqAGaqM2aqZmaqmWaqzGaq/2bVAGbVM2bVZmbVmWbVzGbV/2b/AGb/M2b/Zmb/mWb/zGb//5kAAJkAM5kAZpkAmZkAzJkA/5krAJkrM5krZpkrmZkrzJkr/5lVAJlVM5lVZplVmZlVzJlV/5mAAJmAM5mAZpmAmZmAzJmA/5mqAJmqM5mqZpmqmZmqzJmq/5nVAJnVM5nVZpnVmZnVzJnV/5n/AJn/M5n/Zpn/mZn/zJn//8wAAMwAM8wAZswAmcwAzMwA/8wrAMwrM8wrZswrmcwrzMwr/8xVAMxVM8xVZsxVmcxVzMxV/8yAAMyAM8yAZsyAmcyAzMyA/8yqAMyqM8yqZsyqmcyqzMyq/8zVAMzVM8zVZszVmczVzMzV/8z/AMz/M8z/Zsz/mcz/zMz///8AAP8AM/8AZv8Amf8AzP8A//8rAP8rM/8rZv8rmf8rzP8r//9VAP9VM/9VZv9Vmf9VzP9V//+AAP+AM/+AZv+Amf+AzP+A//+qAP+qM/+qZv+qmf+qzP+q///VAP/VM//VZv/Vmf/VzP/V////AP//M///Zv//mf//zP///wAAAAAAAAAAAAAAAAh7ALHV+mau3b6DCBG6wuZqoStzCREynOjQYEKHFBlaPJgRo6tzCjtStOhRJMeSHg16dOhxn8iS7VB2NPeSoqtvDRnKXFhzZUeWE3tOrLWTIs2iC2MKdeUyp1OK7PbtdHiypruqKKMe3LlRqk2NETtqjejKW62CEdOqjRgQADs="
+    $decode_spacer= "R0lGODlhAQABAIAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="
+    $decode_spacer50= "R0lGODlhMgAyAIAAAP///wAAACH5BAEAAAAALAAAAAAyADIAAAIzhI+py+0Po5y02ouz3rz7D4biSJbmiabqyrbuC8fyTNf2jef6zvf+DwwKh8Si8YhMKicFADs="
+
+    get-variable | Where {$_.Name -like 'decode_*'} | Foreach {
+        $Outfile = ($_.Name -replace 'decode_','') + '.gif'
+        $Content = [System.Convert]::FromBase64String($_.Value)
+        if (-not (test-path $Outfile)) {
+            Set-Content $OutFile -Value $Content -Encoding Byte
+            Write-Output "    Created $Outfile"
+        }
+        else {
+            Write-Output "    $Outfile already exists!"
+        }
+    }
+}
+
+if ($ExtractGifs){
+    Write-Output 'Extracting the embedded gifs to the local directory'
+    ExtractEmbeddedGifs
+    Write-Output 'Please move the extracted files to a publicly accessible web URL so mobile devices will display notification emails properly.'
+    exit
+}
+
+## Don't mess with any variables beyond this point except if you are looking to change the overall wording of the email.
+$ImgageBase1 = @'
+<tr>
+    <td align="left" valign="top"><img src="{{ImagePath}}/spacer.gif" alt="Description: {{ImagePath}}/spacer.gif" width="46" height="28" align="absMiddle">
+    </td>
+</tr>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase2 = @'
+<td width="1" align="left" valign="top" bgcolor="#a8a9ad"><img src="{{ImagePath}}/spacer50.gif" alt="Description: {{ImagePath}}/spacer50.gif" width="1" height="50"></td>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase3 = @'
+ <td><img src="{{ImagePath}}/spacer.gif" alt="Description: {{ImagePath}}/spacer.gif" width="46" height="106"></td>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase6 = @'
+<table id="footer" border="0" cellspacing="0" cellpadding="0" width="655">
+    <tr>
+        <td><img src="{{ImagePath}}/footer_{{AlertLevel}}.gif" alt="Description: {{ImagePath}}/footer_{{AlertLevel}}.gif" width="655" height="81"></td>
+    </tr>
+</table>
+'@ -replace '{{ImagePath}}', $ImagePath -replace '{{AlertLevel}}',$AlertLevel
+$ImageBase7 = @'
+<td align="left" valign="top"><img src="{{ImagePath}}/spacer.gif" alt="Description: {{ImagePath}}/spacer.gif" width="36" height="1"></td>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase8 = @'
+<td align="left" valign="top"><img src="{{ImagePath}}/spacer.gif" alt="Description: {{ImagePath}}/spacer.gif" width="36" height="1"></td>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase9 = @'
+<td align='left'><img border='0' width='14' height='28' src='{{ImagePath}}/image005b.gif' alt='Description: {{ImagePath}}/image005b.gif'></td>
+'@ -replace '{{ImagePath}}', $ImagePath
+$ImageBase10 = @'
+<img src="{{ImagePath}}/header_{{AlertLevel}}.gif" border="0" alt="Description: {{ImagePath}}/header_{{AlertLevel}}.gif" width="655" height="121">
+'@ -replace  '{{ImagePath}}', $ImagePath -replace '{{AlertLevel}}',$AlertLevel
+
+$Image1 = ''
+$Image2 = ''
+$Image3 = ''
+$Image6 = ''
+$Image7 = ''
+$Image8 = ''
+$Image9 = ''
+$Image10 = 'Helpdesk'
+if ($ImagePath -ne '') {
+    $Image1 = $ImageBase1
+    $Image2 = $ImageBase2
+    $Image3 = $ImageBase3
+    $Image6 = $ImageBase6
+    $Image7 = $ImageBase7
+    $Image8 = $ImageBase8
+    $Image9 = $ImageBase9
+    $Image10 = $ImageBase10
+}
+
+$emailbody = @'
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    </head>
+<body>
+    <table id="email" border="0" cellspacing="0" cellpadding="0" width="655" align="center">
+        {{Image1}}
+        {{HelpDeskURL}}
+        <tr>
+            <td>
+                <table id="body" border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        {{Image2}}
+                        {{Image3}}
+                        <td id="text" width="572" align="left" valign="top" style="font-size: 12px; color: #000000; line-height: 17px; font-family: Verdana, Arial, Helvetica, sans-serif">
+
+                        {{FinalNotice}}
+
+                        <p style="font-weight: bold">Hello {{EmailName}},</p>
+                        <p>It's change time again! Your {{Company}} password expires in <span style="background-color: red; color: white; font-weight: bold;">&nbsp;{{DaysTillExpire}}&nbsp;</span> day(s), on {{DateofExpiration}}.</p>
+                        <p>Please use one of the methods below to update your password:</p>
+                        <ol>
+                            <li>{{Company}} office users: You may update your password on your computer by pressing Ctrl-Alt-Delete and selecting 'Change Password' from the available options. </li>
+                            <li>{{Company}} affiliates and remote users: If you only access our email system, please use the following method to easily change your password:</li>
+                            <ul>
+                                <li>Log into <a href="{{PasswordChangeURL}}">the password update site</a> using Internet Explorer (PC) or Safari or Firefox (Mac).</li>
+                                <li>Enter your {{Company}} email address</li>        
+                                <li>Enter your current password, then your new password twice, and click &quot;Submit&quot; to change your password.</li>
+                            </ul>
+                        </ol>
+						<p><span style="font-weight: bold">NOTE 1 - </span>You will now need to use your new password when logging into Outlook Web App, Outlook 2010/2013/2016, SharePoint, Mobile (ActiveSync) devices, etc.</p>
+						<p><span style="font-weight: bold">NOTE 2 - </span>Please remember to update any mobile device wireless settings with your new password if they are being used to connect to the corporate wireless network.</p>
+                        <p><span style="font-weight: bold">NOTE 3 - </span>Please remember to update any mobile device email settings with your new password if they are being used to retrieve corporate email.</p>
+
+                        <p>Think your password couldn't easily be hacked? See how long it would take: <a href="http://howsecureismypassword.net/">How Secure Is My Password</a></p>
+                        <p>Remember, if you do not change your password before it expires on {{DateofExpiration}}, you will be locked out of all {{Company}} Computer Systems until an Administrator unlocks your account.</p>
+
+                        {{AccountPWP}}
+
+                        <p>Thank you,<br />
+                        The {{Company}} Service Desk<br />
+                        {{HelpDeskPhone}}</p>
+
+                        </td>
+                        {{Image3}}
+                        {{Image2}}
+                    </tr>
+                </table>
+  
+                {{Image6}}
+                <table border="0" cellspacing="0" cellpadding="0" width="655" align="center">
+                    <tr>
+                        {{Image7}}
+                        <td align="middle" valign="top">
+                            <font face="Verdana" size="1" color="#000000">
+                                <p>This email was sent by an automated process. If you would like to comment on it please send an email to {{EmailFrom}}</p>
+                             </font>
+                        </td>
+                        {{Image8}}
+					</tr>
+				</table>
+			</td>
+		</tr>      
+		</table>
+    </body>
+</html>
+'@    -replace '{{EmailFrom}}', $EmailFrom `
+        -replace '{{Company}}',$Company `
+        -replace '{{PasswordChangeURL}}', $PasswordChangeURL `
+        -replace '{{HelpDeskPhone}}', $HelpDeskPhone
+
+$emailBodyAccountPWP = @"
+        <table style="background-color: #dedede; border: 1px solid black">
+            <tr>
+                <td style="font-size: 12px; color: #000000; line-height: 17px; font-family: Verdana, Arial, Helvetica, sans-serif"><b>{{Company}} Password Policy</b>
+                    <ul>
+                        <li>You cannot use any of your prior {{PasswordHistory}} passwords.</li>
+                        <li>Your password must have a minimum of a {{MinPasswordLength}} characters.</li>
+                        <li>You may not use a previous password.</li>
+                        <li>Your password must not contain parts of your first, last, or logon name.</li>
+                        <li>Your password must be changed every {{PolicyDays}} days.</li>
+
+                        {{PasswordComplexity}}
+                    </ul>
+                </td>
+            </tr>
+        </table>
+"@                            
+
+$emailbodyPasswordComplexity = @'
+                        <li>Your password requires a minimum of 3 of the following 4 categories:</li>
+                        <ul>
+                            <li>Upper case characters (A-Z)</li>
+                            <li>Lower case characters (a-z)</li>
+                            <li>Numeric characters (0-9)</li>
+                            <li>Special characters</li>                                
+                        </ul>
+'@
+
+$emailBodyFinalNotice = @'
+<div align='left'>
+    <table border='0' cellspacing='0' cellpadding='0' style='width:510px; background-color: white; border: 0px;'>
+        <tr>
+            <td style="font-family: verdana; background: #E12C10; text-align: center; padding: 0px; font-size: 9.0pt; color: white">ALERT: You must change your password today or you will be locked out!</td>
+            {{Image9}}
+        </tr>
+    </table>
+</div>
+'@
+
+$emailbody = $emailbody -replace '{{Image1}}', $Image1 `
+                                      -replace '{{Image2}}', $Image2 `
+                                      -replace '{{Image3}}', $Image3 `
+                                      -replace '{{Image6}}', $Image6 `
+                                      -replace '{{Image7}}', $Image7 `
+                                      -replace '{{Image8}}', $Image8
+
+$emailBodyFinalNotice = $emailBodyFinalNotice -replace '{{Image9}}', $Image9
+
+if ($HelpDeskURL -ne ''){
+    $emailHelpDeskURL = '<tr><td height="121" align="left" valign="bottom"><a href="{{HelpDeskURL}}">{{Image10}}</a></td></tr>' `
+                                    -replace '{{Image10}}', $Image10 `
+                                    -replace '{{HelpdeskURL}}', $HelpDeskURL
+}
+else {
+    $emailHelpDeskURL = '<tr><td height="121" align="left" valign="bottom">{{Image10}}</td></tr>' -replace '{{Image10}}', $Image10
+}
+
+$emailbody = $emailbody -replace '{{HelpDeskURL}}', $emailHelpDeskURL
+
+if ($PreviewUser){
+    $Preview = $true
+    $RunMode = 'Preview'
+}
+
+function Set-ModuleStatus { 
+    [cmdletBinding()]
+    param    (
+        [parameter(ValueFromPipeline = $true, Mandatory = $true, HelpMessage = "No module name specified!")] 
+        [string]$name
+    )
+    if(-not (Get-Module -name "$name")) { 
+        if(Get-Module -ListAvailable | ? {$_.name -eq "$name"}) { 
+            Import-Module -Name "$name" 
+            # module was imported
+            return $true
+        }
+        else {
+            # module was not available (Windows feature isn't installed)
+            return $false
+        }
+    }
+    else {
+        # module was already imported
+        return $true
+    }
+}
+
+function Get-ADUserPasswordExpirationDate {
+    [cmdletBinding()]
+    Param (
+        [Parameter(Mandatory = $true,ValueFromPipeline = $true, HelpMessage = "Identity of the Account")]
+        [Object]$accountIdentity,
+        [Parameter(HelpMessage = 'Anything other than Demo will generate notifications')]
+        [string]$Mode = ''
+    )
+    Begin {
+    }
+    Process {
+        Write-Verbose "..Getting the user info for $accountIdentity"
+        $accountObj = Get-ADUser $accountIdentity -properties PasswordExpired, PasswordNeverExpires, PasswordLastSet, name, mail
+
+        # Make sure the password is not expired, and the account is not set to never expire
+        Write-Verbose "..verifying that the password is not expired, and the user is not set to PasswordNeverExpires"
+        if (((-not ($accountObj.PasswordExpired)) -and (-not ($accountObj.PasswordNeverExpires))) -or ($PreviewUser)) {
+            Write-Verbose "..Verifying if the date the password was last set is available"
+            $passwordSetDate = $accountObj.PasswordLastSet
+            if ($passwordSetDate -ne $null) {
+                $maxPasswordAgeTimeSpan = $null
+                # see if we're at Windows2008 domain functional level, which supports granular password policies
+                if ($Script:DomainFunctionalLevel -ge 4) {
+                    Write-Verbose "..Domain functional level greater than 2008"
+                    # 2008 Domain functional level
+                    $accountFGPP = Get-ADUserResultantPasswordPolicy $accountObj
+                    if ($accountFGPP -ne $null) {
+                        $maxPasswordAgeTimeSpan = $accountFGPP.MaxPasswordAge
+                    }
+                    else {
+                        $maxPasswordAgeTimeSpan = (Get-ADDefaultDomainPasswordPolicy).MaxPasswordAge
+                    }
+                }
+                else { 
+                    # 2003 or ealier Domain Functional Level
+                    Write-Verbose "..Domain functional level is 2003 or earlier"
+                    $maxPasswordAgeTimeSpan = (Get-ADDefaultDomainPasswordPolicy).MaxPasswordAge
+                }                
+                if ($maxPasswordAgeTimeSpan -eq $null -or $maxPasswordAgeTimeSpan.TotalMilliseconds -ne 0) {
+                    $DaysTillExpire = [math]::round(((New-TimeSpan -Start (Get-Date) -End ($passwordSetDate + $maxPasswordAgeTimeSpan)).TotalDays),0)
+                    if ($Mode -eq 'Preview') {
+                        $DaysTillExpire = 1
+                    }
+
+                    if (($LooseMatching -and ($DaysTillExpire -le $DaysToWarn)) -or ((-not $LooseMatching) -and ($DaysTillExpire -eq $DaysToWarn)) -or ($Mode -eq 'Preview')) {
+                        Write-Verbose "...User should receive a notice"
+                        $NotifyUser = $true
+
+                        $PolicyDays = [math]::round((($maxPasswordAgeTimeSpan).TotalDays),0)
+                        if ($Mode -eq 'demo')    {
+                            Write-Host ("{0,-25}{1,-8}{2,-12}" -f $accountObj.Name, $DaysTillExpire, $PolicyDays)
+                            return
+                        }
+
+                        $EmailName = $accountObj.Name                        
+                        $DateofExpiration = (Get-Date).AddDays($DaysTillExpire)
+                        $DateofExpiration = (Get-Date($DateofExpiration) -f $Script:DateFormat).ToString()
+
+                        # start assembling email to user here
+                        $newemailbody = $emailbody -replace '{{EmailName}}', $EmailName `
+                                                                        -replace '{{DaysTillExpire}}', $DaysTillExpire `
+                                                                        -replace '{{DateofExpiration}}', $DateofExpiration
+                        if (($DaysTillExpire -le 1) -and (-not $SurpressFinalNotice)) {
+                            $newemailbody = $newemailbody -replace '{{FinalNotice}}', $emailBodyFinalNotice
+                        }
+                        else {
+                            $newemailbody = $newemailbody -replace '{{FinalNotice}}', ''
+                        }
+
+                        # Add password policy information
+                        if ($accountFGPP -eq $null) {
+                            $newemailBodyAccountPWP = $emailBodyAccountPWP 
+                                                                                -replace '{{MinPasswordLength}}', $MinPasswordLength `
+                                                                                -replace '{{PasswordHistory}}',$PasswordHistory `
+                                                                                -replace '{{PolicyDays}}', $PolicyDays `
+                                                                                -replace '{{Company}}', $Company
+                            if ($PasswordComplexity){
+                                Write-Verbose "..Password complexity found to be enabled!"
+                                $newemailBodyAccountPWP = $newemailBodyAccountPWP -replace '{{PasswordComplexity}}', $emailbodyPasswordComplexity 
+                            }
+                            else {
+                                $newemailBodyAccountPWP = $newemailBodyAccountPWP -replace '{{PasswordComplexity}}', ''
+                            }
+                            $newemailbody = $newemailbody -replace  '{{AccountPWP}}', $newemailBodyAccountPWP
+                        }
+                        else {
+                            $newemailbody = $newemailbody -replace  '{{AccountPWP}}', ''
+                        }
+
+                        $emailto = $accountObj.mail
+                        if ($emailto){
+                            Write-Verbose "..Sending demo message to $emailto"
+                            Send-MailMessage -To $emailto -Subject "Your password expires in $DaysTillExpire day(s)" -Body $newemailbody -From $EmailFrom -Priority High -BodyAsHtml -SmtpServer $EmailServer
+                            $Script:UsersNotified++
+                            $Script:UserIDsNotified += $emailto
+                        }
+                        else {
+                            Write-Verbose "..Can not email this user. Email address is blank"
+                        }
+                    }
+                    else {
+                        $NotifyUser = $false
+                        Write-Verbose  "...User should NOT receive a notice"
+                    }
+                }
+            }
+        }
+	}
+}
+
+Write-Verbose "..Loading AD module"
+if ((Set-ModuleStatus ActiveDirectory) -eq $false){
+    Write-Warning "Active Directory module could not be importeded. Ensure that the RSAT-AD-Powershell feature is installed"
+    Exit
+}
+
+Write-Verbose "..Getting Domain functional level"
+$Script:DomainFunctionalLevel = (Get-AdDomain).DomainMode
+
+if (-NOT $PreviewUser) {
+    if (-not [string]::IsNullOrEmpty($ou)) {
+        Write-Verbose "Filtering users to $ou"
+        $users = Get-AdUser -ldapfilter '(!(name=*$))' -SearchScope subtree -SearchBase $ou -ResultSetSize $null
+    }
+	else {
+        $users = Get-AdUser -ldapfilter '(!(name=*$))' -ResultSetSize $null
+    }
+}
+else{
+    Write-Verbose "Preview mode"
+    try {
+        $users = Get-AdUser $PreviewUser
+    }
+    catch {
+        throw
+    }
+}
+
+if ($demo) {
+    Write-Verbose "...Demo mode"
+    $WhatIfPreference = $true
+    Write-Host "`n"
+    Write-Host ("{0,-25}{1,-8}{2,-12}" -f "User", "Expires", "Policy") -ForegroundColor cyan
+    Write-Host ("{0,-25}{1,-8}{2,-12}" -f "========================", "=======", "===========") -ForegroundColor cyan
+}
+
+Write-Verbose "...Setting event log configuration"
+[object]$evt = new-object System.Diagnostics.EventLog("Application")
+[string]$evt.Source = $ScriptName
+$infoevent = [System.Diagnostics.EventLogEntryType]::Information
+[string]$EventLogText = "Beginning processing`n`r" + $TaskName + "`n`r" + $TaskDesc
+
+Write-Verbose "...Getting password policy configuration"
+$DefaultDomainPasswordPolicy = Get-ADDefaultDomainPasswordPolicy
+[int]$MinPasswordLength = $DefaultDomainPasswordPolicy.MinPasswordLength
+# this needs to look for FGPP, and then default to this if it doesn't exist
+[bool]$PasswordComplexity = $DefaultDomainPasswordPolicy.ComplexityEnabled
+[int]$PasswordHistory = $DefaultDomainPasswordPolicy.PasswordHistoryCount
+
+ if ($Demo) {
+    $RunMode = 'Demo'
+ }
+
+ForEach ($user in $users){
+    Write-verbose "...Processing user: $user"
+    Get-ADUserPasswordExpirationDate $user.samaccountname -Mode $RunMode
+}
+
+# Write event log of actions taken
+Write-Verbose "...Writing summary event log entry"
+$EventLogText = "Finished processing $($Script:UsersNotified) account(s). `n`r" + $TaskName + "`n`r" + $TaskDesc + "`n`rThe users processed are as follows:`n`r" + ($Script:UserIDsNotified -join "`n`r")
+$evt.WriteEntry($EventLogText,$infoevent,70)
