@@ -25,7 +25,7 @@ If you want the dummy way of running this script simply copy to your server and 
 `Show-Command .\New-ADPasswordReminder.ps1`
 
 You then get a nice little GUI like this:
-![](http://)
+![](https://github.com/zloeber/New-ADPasswordReminder/blob/master/pics/example1.gif)
 
 The examples below should be sufficient to get you started with this script.
 
