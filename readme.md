@@ -405,8 +405,11 @@ And that's all there is to it really. The scheduled task will run if all the loc
 
 
 ##Other Information
+
 **Author:** Zachary Loeber
+
 **Original Author** Pat Richard
 
 **My Website:** http://www.the-little-things.net
+
 **Original Script Website** http://www.ehloworld.com/318
