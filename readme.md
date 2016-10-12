@@ -6,11 +6,13 @@ A single, self-extracting, self-scheduling, AD password change notice PowerShell
 This script notifies users that their password is about to expire. I've taken the work done by others and added some features to make it easier to schedule and manage.
 
 The overall changes to the original script were meant to facilitate multiple runs of the script to send out notifications in a less spammy way. For example:
+
 1. 7 Days until the password will expire -> Send a warning (yellow) email notice
 2. 3 Days until the password will expire -> Send an alert (red) email notice
 3. 1 Day until the password will expire -> Send a final alert (red) notice
 
 I've also made numerous readability and other feature additions. This includes (but is not limited to);
+
 1. Ability to distribute the script in 1 file and self-extract the gif files used in the notices.
 2. Total rewrite of the notice generation to be a bit more centralized (and therefore easier to locate and customize if needed)
 3. Elimination of global variables
