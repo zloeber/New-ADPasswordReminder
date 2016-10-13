@@ -87,9 +87,9 @@ Firstly you will need to setup your MSA. Replace anything in angle brackets as n
 ```
 New-ADServiceAccount -SamAccountName "ADPWNotice" -Name "ADPWNotice" -Description "Account used for running the AD PW notification task on <Computer>" -DNSHostName <Domain Controller>
 Set-ADServiceAccount -Identity ADPWNotice -PrincipalsAllowedToRetrieveManagedPassword <Computer>$ -Enabled $true
-Add-ADComputerServiceAccount -Identity "SVPR-DC-A4" -ServiceAccount "ADPWNotice"
-Add-ADGroupMember "Domain Users" "CN=ADPWNotice,CN=Managed Service Accounts,DC=isaca,DC=org"
-Add-ADGroupMember "Backup Operators" "CN=ADPWNotice,CN=Managed Service Accounts,DC=isaca,DC=org"
+Add-ADComputerServiceAccount -Identity "<Domain Controller>" -ServiceAccount "ADPWNotice"
+Add-ADGroupMember "Domain Users" "CN=ADPWNotice,CN=Managed Service Accounts,DC=<contoso>,DC=<com>"
+Add-ADGroupMember "Backup Operators" "CN=ADPWNotice,CN=Managed Service Accounts,DC=<contoso>,DC=<com>"
 ```
 
 
